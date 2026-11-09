@@ -1,0 +1,34 @@
+# ═══════════════════════════════════════════════
+# Steam-Offline-Archiver · .gitignore
+# ═══════════════════════════════════════════════
+
+# ── 归档输出（抓取产物，体积可达数 GB，不入库）──
+out/
+AppID_*/
+*-html/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# ── 个人配置 / 一次性脚本 / 备份 ──
+gui_config.json
+run_enrich.ps1
+*.bak
+*.bak_*
+*.bak-*
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── 临时工作目录 ──
+_pull/
+.backup/
+*.log
