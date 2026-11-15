@@ -428,6 +428,22 @@ REVIEWS_JS_CODE = r"""
   // 🆕 BBCode → HTML（评论正文渲染；spoiler 渲染成可展开折叠块，与 Steam 行为一致）
   function bbToHtml(text) {
     var s = esc(text);
+
+    // ① [code] 块先摘出保护：<pre> 自身保留换行，若再参与 \n → <br> 会变成双倍行距
+    var codeBlocks = [];
+    s = s.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, function(m, body) {
+      var k = "\u0000C" + codeBlocks.length + "\u0000";
+      codeBlocks.push('<pre class="bb-code">' + body.replace(/^\r?\n/, "").replace(/\r?\n$/, "") + "</pre>");
+      return k;
+    });
+
+    // ② 结构换行清理：表格/引用内部的纯排版换行不能变成 <br>
+    //    （<table> 内出现游离 <br> 会被浏览器“抬”到表格外，堆成一长串空白）
+    s = s.replace(/(\[(?:table|tr|td|th|\/table|\/tr|\/td|\/th)\])[ \t]*\r?\n+[ \t]*/gi, "$1");
+    s = s.replace(/[ \t]*\r?\n+[ \t]*(?=\[(?:table|tr|td|th|\/table|\/tr|\/td|\/th)\])/gi, "");
+    s = s.replace(/(\[quote(?:=[^\]]*)?\])[ \t]*\r?\n+[ \t]*/gi, "$1");
+    s = s.replace(/[ \t]*\r?\n+[ \t]*(?=\[\/quote\])/gi, "");
+
     s = s.replace(/\[spoiler\]([\s\S]*?)\[\/spoiler\]/gi,
       '<details class="bb-spoiler"><summary>⚠️ 剧透内容 · 点击展开</summary><div class="bb-spoiler-body">$1</div></details>');
     s = s.replace(/\[h1\]([\s\S]*?)\[\/h1\]/gi, '<div class="bb-h1">$1</div>');
@@ -441,7 +457,6 @@ REVIEWS_JS_CODE = r"""
     s = s.replace(/\[quote\]([\s\S]*?)\[\/quote\]/gi, '<blockquote class="bb-quote">$1</blockquote>');
     s = s.replace(/\[quote=([^\]]+)\]/gi, '<blockquote class="bb-quote"><small>$1</small><br>');
     s = s.replace(/\[\/quote\]/gi, "</blockquote>");
-    s = s.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, '<pre class="bb-code">$1</pre>');
     s = s.replace(/\[hr\]\s*(?:\[\/hr\])?/gi, '<hr class="bb-hr">');
     s = s.replace(/\[table\]/gi, '<table class="bb-table">');
     s = s.replace(/\[\/table\]/gi, '</table>');
@@ -455,6 +470,13 @@ REVIEWS_JS_CODE = r"""
     s = s.replace(/\[\/?\*\]/g, "");
     s = s.replace(/\[\/?[a-zA-Z][^\]]*\]/g, "");
     s = s.replace(/\n/g, "<br>");
+
+    // ③ 还原受保护的 [code] 块（此时全局 \n → <br> 已完成，pre 内保持真实换行）
+    for (var ci = 0; ci < codeBlocks.length; ci++) {
+      (function(idx) {
+        s = s.replace("\u0000C" + idx + "\u0000", function() { return codeBlocks[idx]; });
+      })(ci);
+    }
     return s;
   }
   function fmtPlaytime(min) {
