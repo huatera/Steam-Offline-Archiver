@@ -385,6 +385,8 @@ def bbcode_strip(text):
     s = str(text)
     # 先保留包裹标签的内容
     s = re.sub(r'\[spoiler\](.*?)\[/spoiler\]', r'\1', s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r'\[url\s*=\s*[^\]]+\](.*?)\[/url\]', r'\1', s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r'\[url\](.*?)\[/url\]', r'\1', s, flags=re.DOTALL | re.IGNORECASE)
     # 去掉剩下的所有 [xxx] / [/xxx] 标签
     s = re.sub(r'\[\*\]', '', s)
     s = re.sub(r'\[/?[a-zA-Z][^\]]*\]', '', s)
@@ -422,6 +424,8 @@ REVIEWS_JS_CODE = r"""
   function bbStrip(text) {
     return String(text == null ? "" : text)
       .replace(/\[spoiler\]([\s\S]*?)\[\/spoiler\]/gi, "$1")
+      .replace(/\[url\s*=\s*[^\]]+\]([\s\S]*?)\[\/url\]/gi, "$1")
+      .replace(/\[url\]([\s\S]*?)\[\/url\]/gi, "$1")
       .replace(/\[\/?\*\]/g, "")
       .replace(/\[\/?[a-zA-Z][^\]]*\]/g, "");
   }
@@ -429,12 +433,13 @@ REVIEWS_JS_CODE = r"""
   function bbToHtml(text) {
     var s = esc(text);
 
-    // ① [code] 块先摘出保护：<pre> 自身保留换行，若再参与 \n → <br> 会变成双倍行距
-    var codeBlocks = [];
+    // ① [code] 块：Steam 官方只做等宽样式，内部 BBCode 仍照常解析（实测 [code] 里的 [url] 会变成真链接）
+    //    用哨兵标记边界，内部内容照常参与后续标签解析
+    var codeOpen = [], codeClose = [];
     s = s.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, function(m, body) {
-      var k = "\u0000C" + codeBlocks.length + "\u0000";
-      codeBlocks.push('<pre class="bb-code">' + body.replace(/^\r?\n/, "").replace(/\r?\n$/, "") + "</pre>");
-      return k;
+      var idx = codeOpen.length;
+      codeOpen.push(idx);
+      return "\u0000CO" + idx + "\u0000" + body.replace(/^\r?\n/, "").replace(/\r?\n$/, "") + "\u0000CC" + idx + "\u0000";
     });
 
     // ② 结构换行清理：表格/引用内部的纯排版换行不能变成 <br>
@@ -457,6 +462,20 @@ REVIEWS_JS_CODE = r"""
     s = s.replace(/\[quote\]([\s\S]*?)\[\/quote\]/gi, '<blockquote class="bb-quote">$1</blockquote>');
     s = s.replace(/\[quote=([^\]]+)\]/gi, '<blockquote class="bb-quote"><small>$1</small><br>');
     s = s.replace(/\[\/quote\]/gi, "</blockquote>");
+    // 🆕 [url=...]label[/url] / [url]url[/url] → <a>（Steam 允许 = 后有空格或引号）
+    s = s.replace(/\[url\s*=\s*([^\]]+)\]([\s\S]*?)\[\/url\]/gi, function(m, rawUrl, label) {
+      var u = rawUrl.trim();
+      // Steam 三种写法都要认：[url=https://x] / [url= https://x] / [url="https://x"]
+      // esc() turns quotes into entities; strip both forms
+      u = u.replace(/^(?:&quot;|&#39;|["'])+/i, "").replace(/(?:&quot;|&#39;|["'])+$/i, "").trim();
+      if (!/^https?:\/\//i.test(u)) return label;
+      return '<a href="' + u + '" target="_blank" rel="noreferrer">' + label + '</a>';
+    });
+    s = s.replace(/\[url\]([\s\S]*?)\[\/url\]/gi, function(m, rawUrl) {
+      var u = rawUrl.trim();
+      if (!/^https?:\/\//i.test(u)) return rawUrl;
+      return '<a href="' + u + '" target="_blank" rel="noreferrer">' + u + '</a>';
+    });
     s = s.replace(/\[hr\]\s*(?:\[\/hr\])?/gi, '<hr class="bb-hr">');
     s = s.replace(/\[table\]/gi, '<table class="bb-table">');
     s = s.replace(/\[\/table\]/gi, '</table>');
@@ -471,11 +490,10 @@ REVIEWS_JS_CODE = r"""
     s = s.replace(/\[\/?[a-zA-Z][^\]]*\]/g, "");
     s = s.replace(/\n/g, "<br>");
 
-    // ③ 还原受保护的 [code] 块（此时全局 \n → <br> 已完成，pre 内保持真实换行）
-    for (var ci = 0; ci < codeBlocks.length; ci++) {
-      (function(idx) {
-        s = s.replace("\u0000C" + idx + "\u0000", function() { return codeBlocks[idx]; });
-      })(ci);
+    // ③ 哨兵换成真正的 <div class="bb-code"> 外壳
+    for (var ci = 0; ci < codeOpen.length; ci++) {
+      s = s.replace("\u0000CO" + ci + "\u0000", '<div class="bb-code">');
+      s = s.replace("\u0000CC" + ci + "\u0000", '</div>');
     }
     return s;
   }
@@ -1575,7 +1593,7 @@ def render_achievements_section(appdetails_data, achievements_global, ctx):
 def bbcode_to_html(bbcode):
     """将 Steam BBCode 富文本转成基础 HTML（保留归档价值，安全离线可用）
     🏛️ 架构：这份逻辑与 fetch_news.py 里的 bbcode_to_html 保持一致，
-    修 BBCode bug 时优先改这里（零流量重渲染），fetch 侧那份仅为向后兼容旧 json。
+    修 BBCode bug 时优先改这里（零流量重渲某），fetch 侧那份仅为向后兼容旧 json。
     """
     if not bbcode:
         return ""
@@ -1612,7 +1630,6 @@ def bbcode_to_html(bbcode):
     s = re.sub(r'\[strike\](.*?)\[/strike\]', r'<s>\1</s>', s, flags=re.DOTALL)
     s = re.sub(r'\[s\](.*?)\[/s\]', r'<s>\1</s>', s, flags=re.DOTALL)
     s = re.sub(r'\[hr\]\s*(?:\[/hr\])?', '<hr class="bb-hr">', s)
-    s = re.sub(r'\[code\](.*?)\[/code\]', r'<pre class="bb-code">\1</pre>', s, flags=re.DOTALL)
     s = re.sub(r'\[quote=([^\]]+)\]', r'<blockquote class="bb-quote"><small>\1</small><br>', s)
     s = re.sub(r'\[quote\](.*?)\[/quote\]', r'<blockquote class="bb-quote">\1</blockquote>', s, flags=re.DOTALL)
     s = re.sub(r'\[quote\]', '<blockquote class="bb-quote">', s)
@@ -1644,6 +1661,8 @@ def bbcode_to_html(bbcode):
 
     s = re.sub(r'\[url=([^\]]+)\](.*?)\[/url\]', url_link, s, flags=re.DOTALL)
     s = re.sub(r'\[url\](.*?)\[/url\]', url_link, s, flags=re.DOTALL)
+    # [code] 包成等宽块（Steam 官方是 div.bb_code，内部 BBCode 仍会解析）
+    s = re.sub(r'\[code\](.*?)\[/code\]', r'<div class="bb-code">\1</div>', s, flags=re.DOTALL)
     # 清理剩余的未识别 BBCode 标签
     s = re.sub(r'\[/?\*\]', '', s)
     s = re.sub(r'\[/?[a-zA-Z][^\]]*\]', '', s)
