@@ -19,6 +19,13 @@ import time
 import urllib.request
 import urllib.error
 
+# Windows GBK 控制台兜底：emoji/特殊符号直接替换，避免 UnicodeEncodeError 崩溃
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
 MAX_RETRIES = 3
 TIMEOUT = 30
 REQUEST_INTERVAL = 1.5
@@ -191,10 +198,32 @@ def main():
 
     t0 = time.time()
 
+    # ── 断点续传：读已有详情缓存 ──────────────────────────────
+    lang_tag = LANG_TAG.get(args.lang.lower(), args.lang.lower())
+    out_file = os.path.join(out_dir, f"news_details_{lang_tag}.json")
+
+    cached_events = []
+    cached_gids = set()
+    if os.path.exists(out_file):
+        try:
+            with open(out_file, "r", encoding="utf-8") as f:
+                old = json.load(f)
+            cached_events = old.get("events", []) or []
+            cached_gids = {str(ev.get("gid")) for ev in cached_events if ev.get("gid")}
+            print(f"🔁 断点续传：已有 {len(cached_events)} 条详情缓存（{len(cached_gids)} 个 gid）")
+        except Exception as e:
+            print(f"⚠️  读取已有详情缓存失败: {e}，将全量重拉")
+            cached_events = []
+            cached_gids = set()
+
     # Step 1: 拿索引
     index = fetch_index_from_html(appid, lang=args.lang)
     if not index:
-        print("💥 索引为空")
+        if cached_events:
+            print("⚠️  索引不可用，但已有详情缓存 → 沿用缓存，不中断流水线")
+            print(f"✨ 沿用缓存完成，详情 {len(cached_events)} 条 · {out_file}")
+            return
+        print("💥 索引为空且无缓存可用")
         sys.exit(2)
     print(f"✅ 拿到 {len(index)} 条公告索引")
 
@@ -202,13 +231,37 @@ def main():
         index = index[:args.max]
         print(f"🎯 应用 --max {args.max}，处理 {len(index)} 条")
 
+    # ── 增量筛选：只拉缓存里没有的 gid（索引 unique_id == event.gid）──
+    if cached_gids:
+        before = len(index)
+        index = [it for it in index if str(it.get("gid")) not in cached_gids]
+        skipped = before - len(index)
+        if skipped:
+            print(f"🔁 增量模式：跳过 {skipped} 条已缓存，待拉 {len(index)} 条")
+        else:
+            print("✅ 索引中的 gid 全部已缓存")
+    if not index:
+        if cached_events:
+            print(f"✨ 无新增详情，沿用缓存 {len(cached_events)} 条")
+            return
+        print("💥 无可拉取的索引")
+        sys.exit(2)
+
     # Step 2: 分批拉详情
     print("─" * 60)
     print(f"📥 分批拉详情（每批 {args.batch} 条，间隔 {REQUEST_INTERVAL}s）")
 
-    all_events = []
+    all_events = list(cached_events)  # 以缓存为基础，增量追加
     total_batches = (len(index) + args.batch - 1) // args.batch
     lang_stats = {"target": 0, "fallback": 0, "other": 0}
+    for _ev in cached_events:
+        _lang = ((_ev.get("announcement_body") or {}).get("language"))
+        if _lang == lang_code:
+            lang_stats["target"] += 1
+        elif _lang == fallback_code:
+            lang_stats["fallback"] += 1
+        else:
+            lang_stats["other"] += 1
 
     for i in range(0, len(index), args.batch):
         batch = index[i:i + args.batch]
@@ -243,7 +296,6 @@ def main():
     # Step 3: 写文件
     now = int(time.time())
     now_iso = datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
-    lang_tag = LANG_TAG.get(args.lang.lower(), args.lang.lower())
 
     payload = {
         "appid": appid,
